@@ -109,34 +109,16 @@ def locate(
     name,
     suggestions=True,
     n=5,
-    cutoff=0.6,
 ):
     """
-    Locate a function, class, or async function.
+    Locate a function or class inside a package.
 
-    If the exact name is not found, optionally return
-    similar names as suggestions.
-
-    Example:
-
-        locate("sklearn", "LogisticRegression")
-
-        locate("sklearn", "LogisticRegresion")
-
-    Args:
-        package_name: Package to search.
-        name: Function/class name to find.
-        suggestions: Whether to provide suggestions.
-        n: Maximum number of suggestions.
-        cutoff: Similarity threshold from 0 to 1.
+    If the exact name isn't found, return similar symbols.
     """
 
     symbols = _scan_package(package_name)
 
-    # ---------------------------------------------------------
-    # Exact match
-    # ---------------------------------------------------------
-
+    # Exact source definition
     if name in symbols:
         return {
             "found": True,
@@ -144,70 +126,20 @@ def locate(
             "suggestions": [],
         }
 
-    # ---------------------------------------------------------
-    # Try public package API
-    # ---------------------------------------------------------
-
-    try:
-        package = importlib.import_module(package_name)
-
-        if hasattr(package, name):
-
-            obj = getattr(package, name)
-
-            try:
-                source_file = inspect.getsourcefile(obj)
-                source_lines = inspect.getsourcelines(obj)
-                line = source_lines[1]
-            except (TypeError, OSError):
-                source_file = None
-                line = None
-
-            result = {
-                "name": name,
-                "package": package_name,
-                "module": getattr(obj, "__module__", None),
-                "file": source_file,
-                "line": line,
-                "type": (
-                    "class"
-                    if inspect.isclass(obj)
-                    else "function"
-                    if inspect.isfunction(obj)
-                    else type(obj).__name__
-                ),
-            }
-
-            return {
-                "found": True,
-                "result": result,
-                "suggestions": [],
-            }
-
-    except Exception:
-        pass
-
-    # ---------------------------------------------------------
-    # No exact match → suggestions
-    # ---------------------------------------------------------
-
-    suggestions_list = []
+    # No exact match -> suggestions
+    suggestion_list = []
 
     if suggestions:
-        matches = get_close_matches(
+        suggestion_list = _get_suggestions(
             name,
-            symbols.keys(),
+            symbols,
             n=n,
-            cutoff=cutoff,
         )
-
-        for match in matches:
-            suggestions_list.append(symbols[match])
 
     return {
         "found": False,
         "result": None,
-        "suggestions": suggestions_list,
+        "suggestions": suggestion_list,
     }
 
 
