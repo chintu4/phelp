@@ -1,4 +1,4 @@
-from .main import find_function
+from .main import find_function,locate
 
 # def main() -> None:
-#     print("Hello from phelp!")
+#     print("Hello from phelp!
