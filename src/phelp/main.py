@@ -2,6 +2,7 @@ import ast
 import importlib
 import importlib.util
 import inspect
+from difflib import get_close_matches
 from pathlib import Path
 
 
@@ -22,7 +23,7 @@ def _get_package_path(package_name):
 
 
 def _module_name(package_name, package_path, file_path):
-    """Convert a Python file path into its module name."""
+    """Convert a Python file path into a module name."""
     relative = file_path.relative_to(package_path)
 
     if relative.name == "__init__.py":
@@ -30,125 +31,186 @@ def _module_name(package_name, package_path, file_path):
     else:
         relative = relative.with_suffix("")
 
-    parts = list(relative.parts)
+    if not relative.parts:
+        return package_name
 
-    if parts:
-        return package_name + "." + ".".join(parts)
-
-    return package_name
+    return package_name + "." + ".".join(relative.parts)
 
 
-def _find_in_source(file_path, name):
-    """Find a function/class definition in a Python source file."""
-    try:
-        source = file_path.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-    except (OSError, UnicodeDecodeError, SyntaxError):
-        return None
-
-    for node in ast.walk(tree):
-        if isinstance(
-            node,
-            (
-                ast.FunctionDef,
-                ast.AsyncFunctionDef,
-                ast.ClassDef,
-            ),
-        ):
-            if node.name == name:
-                if isinstance(node, ast.ClassDef):
-                    object_type = "class"
-                elif isinstance(node, ast.AsyncFunctionDef):
-                    object_type = "async_function"
-                else:
-                    object_type = "function"
-
-                return {
-                    "type": object_type,
-                    "line": node.lineno,
-                    "end_line": getattr(node, "end_lineno", node.lineno),
-                }
-
-    return None
-
-
-def locate(package_name, name):
+def _scan_package(package_name):
     """
-    Locate a function, class, or async function inside a Python package.
+    Scan a package without importing all of its submodules.
 
-    Example:
-        locate("sklearn", "train_test_split")
-        locate("sklearn", "LogisticRegression")
+    Returns:
+        dict:
+            {
+                "name": {
+                    "type": ...,
+                    "module": ...,
+                    "file": ...,
+                    "line": ...
+                }
+            }
     """
 
     package_path = _get_package_path(package_name)
 
-    # ---------------------------------------------------------
-    # 1. Search Python source files
-    # ---------------------------------------------------------
+    symbols = {}
 
     for file_path in package_path.rglob("*.py"):
 
-        result = _find_in_source(file_path, name)
+        try:
+            source = file_path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
 
-        if result:
-            module = _module_name(
-                package_name,
-                package_path,
-                file_path,
-            )
+        module = _module_name(
+            package_name,
+            package_path,
+            file_path,
+        )
 
-            return {
-                "name": name,
-                "package": package_name,
-                "module": module,
-                "file": str(file_path),
-                **result,
-            }
+        for node in ast.walk(tree):
+
+            if isinstance(node, ast.ClassDef):
+                symbol_type = "class"
+
+            elif isinstance(node, ast.AsyncFunctionDef):
+                symbol_type = "async_function"
+
+            elif isinstance(node, ast.FunctionDef):
+                symbol_type = "function"
+
+            else:
+                continue
+
+            # Keep the first definition we find
+            if node.name not in symbols:
+                symbols[node.name] = {
+                    "name": node.name,
+                    "type": symbol_type,
+                    "package": package_name,
+                    "module": module,
+                    "file": str(file_path),
+                    "line": node.lineno,
+                    "end_line": getattr(
+                        node,
+                        "end_lineno",
+                        node.lineno,
+                    ),
+                }
+
+    return symbols
+
+
+def locate(
+    package_name,
+    name,
+    suggestions=True,
+    n=5,
+    cutoff=0.6,
+):
+    """
+    Locate a function, class, or async function.
+
+    If the exact name is not found, optionally return
+    similar names as suggestions.
+
+    Example:
+
+        locate("sklearn", "LogisticRegression")
+
+        locate("sklearn", "LogisticRegresion")
+
+    Args:
+        package_name: Package to search.
+        name: Function/class name to find.
+        suggestions: Whether to provide suggestions.
+        n: Maximum number of suggestions.
+        cutoff: Similarity threshold from 0 to 1.
+    """
+
+    symbols = _scan_package(package_name)
 
     # ---------------------------------------------------------
-    # 2. If not found, try imported/public API
+    # Exact match
+    # ---------------------------------------------------------
+
+    if name in symbols:
+        return {
+            "found": True,
+            "result": symbols[name],
+            "suggestions": [],
+        }
+
+    # ---------------------------------------------------------
+    # Try public package API
     # ---------------------------------------------------------
 
     try:
         package = importlib.import_module(package_name)
+
+        if hasattr(package, name):
+
+            obj = getattr(package, name)
+
+            try:
+                source_file = inspect.getsourcefile(obj)
+                source_lines = inspect.getsourcelines(obj)
+                line = source_lines[1]
+            except (TypeError, OSError):
+                source_file = None
+                line = None
+
+            result = {
+                "name": name,
+                "package": package_name,
+                "module": getattr(obj, "__module__", None),
+                "file": source_file,
+                "line": line,
+                "type": (
+                    "class"
+                    if inspect.isclass(obj)
+                    else "function"
+                    if inspect.isfunction(obj)
+                    else type(obj).__name__
+                ),
+            }
+
+            return {
+                "found": True,
+                "result": result,
+                "suggestions": [],
+            }
+
     except Exception:
-        return None
+        pass
 
-    if hasattr(package, name):
-        obj = getattr(package, name)
+    # ---------------------------------------------------------
+    # No exact match → suggestions
+    # ---------------------------------------------------------
 
-        try:
-            source_file = inspect.getsourcefile(obj)
-            source_lines = inspect.getsourcelines(obj)
-            line = source_lines[1]
-        except (TypeError, OSError):
-            source_file = None
-            line = None
+    suggestions_list = []
 
-        return {
-            "name": name,
-            "package": package_name,
-            "module": getattr(obj, "__module__", None),
-            "file": source_file,
-            "line": line,
-            "type": (
-                "class"
-                if inspect.isclass(obj)
-                else "function"
-                if inspect.isfunction(obj)
-                else type(obj).__name__
-            ),
-        }
+    if suggestions:
+        matches = get_close_matches(
+            name,
+            symbols.keys(),
+            n=n,
+            cutoff=cutoff,
+        )
 
-    return None
+        for match in matches:
+            suggestions_list.append(symbols[match])
+
+    return {
+        "found": False,
+        "result": None,
+        "suggestions": suggestions_list,
+    }
 
 
 def find_function(package_name, name):
-    """
-    Backwards-compatible alias for locate().
-
-    Example:
-        find_function("sklearn", "train_test_split")
-    """
+    """Backward-compatible alias."""
     return locate(package_name, name)
